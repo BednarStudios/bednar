@@ -1,0 +1,1 @@
+# Bednar Bedwars Game Type
