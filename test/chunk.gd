@@ -594,4 +594,143 @@ func rebuild_merged_mesh():
 		if merged_mesh.get_surface_count() > 0:
 			all_meshes[block_type] = merged_mesh
 	
-	if not all_meshes.is_e
+	if not all_meshes.is_empty():
+		var final_mesh = merge_multiple_meshes(all_meshes)
+		
+		var mmi = get_node_or_null("chunk_mesh")
+		if not mmi:
+			mmi = MultiMeshInstance3D.new()
+			mmi.name = "chunk_mesh"
+			add_child(mmi)
+		
+		var mm = MultiMesh.new()
+		mm.mesh = final_mesh
+		mm.transform_format = MultiMesh.TRANSFORM_3D
+		mm.instance_count = 1
+		mm.set_instance_transform(0, Transform3D.IDENTITY)
+		
+		mmi.multimesh = mm
+		
+		# Aplica o material correto
+		for block_type in all_meshes:
+			if world.world_loader.blocks_data[block_type].texture_alpha:
+				mmi.material_override = world.global_alpha_material
+				break
+			else:
+				mmi.material_override = world.global_material
+		
+			mesh_instances[block_type] = mmi
+
+func global_to_local(g_pos: Vector3i) -> Vector3i:
+	return g_pos - Vector3i(self.global_position)
+#endregion
+
+#region Linked Blocks
+@warning_ignore("shadowed_variable")
+func set_block_linked_blocks(linked_blocks: Dictionary, base_position: Vector3i, grouped_blocks: Dictionary, global_block_map: Dictionary):
+	# Obter a rotação do bloco principal (em graus)
+	var base_rotation = 0
+	if global_block_map.has(base_position) and global_block_map[base_position].has("rotation"):
+		base_rotation = global_block_map[base_position]["rotation"]
+	
+	# Converter para radianos e criar uma base de rotação
+	var rotation_rad = deg_to_rad(base_rotation)
+	var rot_basis = Basis(Vector3.UP, rotation_rad)
+
+	for direction in linked_blocks.keys():
+		var linked_block_str = str(linked_blocks[direction])
+		var id_regex = RegEx.new()
+		id_regex.compile(r"id=(.+)$")
+		var result = id_regex.search(linked_block_str)
+		if not result:
+			continue
+		var linked_block_id = result.get_string(1)
+
+		# Determinar a posição relativa baseada na rotação
+		var offset_local = Vector3i.ZERO
+		match direction:
+			"top": offset_local = Vector3i(0, 1, 0)
+			"bottom": offset_local = Vector3i(0, -1, 0)
+			"left": offset_local = Vector3i(-1, 0, 0)
+			"right": offset_local = Vector3i(1, 0, 0)
+			"front": offset_local = Vector3i(0, 0, 1)
+			"back": offset_local = Vector3i(0, 0, -1)
+		
+		# Rotacionar o offset de acordo com a rotação do bloco principal
+		var offset_rotated = rot_basis * Vector3(offset_local)
+		var offset = Vector3i(
+			round(offset_rotated.x),
+			round(offset_rotated.y),
+			round(offset_rotated.z)
+		)
+
+		var linked_pos = base_position + offset
+
+		# Ignorar se já existe algo na posição
+		if global_block_map.has(linked_pos):
+			continue
+
+		# Adicionar nos blocos agrupados
+		if not grouped_blocks.has(linked_block_id):
+			grouped_blocks[linked_block_id] = []
+		
+		# Manter a mesma rotação do bloco principal
+		var block_info = world.world_loader.blocks_data[linked_block_id]
+		grouped_blocks[linked_block_id].append([
+			linked_pos, 
+			[0, 1, 2, 3, 4, 5], # Todas faces visíveis inicialmente
+			{
+				"rotation": base_rotation, # Mesma rotação do principal
+				"custom_data": block_info.custom_data
+			}
+		])
+		
+		# Atualiza o mapa global
+		global_block_map[linked_pos] = {
+			"block_id": linked_block_id, 
+			"visible_faces": [],
+			"rotation": base_rotation # Garantir que a rotação seja armazenada
+		}
+
+@warning_ignore("shadowed_variable")
+func destroy_block_linked_blocks(linked_blocks: Dictionary, base_position: Vector3i, _grouped_blocks: Dictionary, global_block_map: Dictionary):
+	for direction in linked_blocks.keys():
+		var linked_block_str = str(linked_blocks[direction]) # Exemplo: "bednar:block.id=oak_door_top"
+
+		# Extrair o ID do bloco vinculado
+		var id_regex = RegEx.new()
+		id_regex.compile(r"id=(.+)$")
+		var result = id_regex.search(linked_block_str)
+		if not result:
+			continue
+		var linked_block_id = result.get_string(1)
+
+		# Calcular a posição relativa
+		var offset
+		match direction:
+			"top": offset = Vector3i(0, 1, 0)
+			"bottom": offset = Vector3i(0, -1, 0)
+			"left": offset = Vector3i(-1, 0, 0)
+			"right": offset = Vector3i(1, 0, 0)
+			"front": offset = Vector3i(0, 0, -1)
+			"back": offset = Vector3i(0, 0, 1)
+			_: offset = Vector3i.ZERO
+
+		var linked_pos = base_position + offset
+
+		# Verificar se o bloco na posição é o que queremos remover
+		if global_block_map.has(linked_pos):
+			var data = global_block_map[linked_pos]
+			if data.has("block_id") and data["block_id"] == linked_block_id:
+				# Remover do mapa global
+				global_block_map.erase(linked_pos)
+
+		# Remover também do chunk local, se existir
+		if _grouped_blocks.has(linked_block_id):
+			# Procurar e remover a posição na lista
+			var blocks = _grouped_blocks[linked_block_id]
+			for i in range(blocks.size()):
+				if blocks[i][0] == linked_pos:
+					blocks.remove_at(i)
+					break
+#endregion
